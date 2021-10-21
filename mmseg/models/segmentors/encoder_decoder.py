@@ -7,6 +7,7 @@ from mmseg.ops import resize
 from .. import builder
 from ..builder import SEGMENTORS
 from .base import BaseSegmentor
+from ..decode_heads import UPerLanHead, FCNLanHead
 
 
 @SEGMENTORS.register_module()
@@ -66,13 +67,22 @@ class EncoderDecoder(BaseSegmentor):
 
         super(EncoderDecoder, self).init_weights(pretrained)
         self.backbone.init_weights(pretrained=pretrained)
-        self.decode_head.init_weights()
+        if isinstance(self.decode_head, UPerLanHead):
+            self.decode_head.init_weights(pretrained=pretrained)
+        else:
+            self.decode_head.init_weights()
         if self.with_auxiliary_head:
             if isinstance(self.auxiliary_head, nn.ModuleList):
                 for aux_head in self.auxiliary_head:
-                    aux_head.init_weights()
+                    if isinstance(aux_head, FCNLanHead):
+                        aux_head.init_weights(pretrained=pretrained)
+                    else:
+                        aux_head.init_weights()
             else:
-                self.auxiliary_head.init_weights()
+                if isinstance(self.auxiliary_head, FCNLanHead):
+                    self.auxiliary_head.init_weights(pretrained=pretrained)
+                else:
+                    self.auxiliary_head.init_weights()
 
     def extract_feat(self, img):
         """Extract features from images."""
