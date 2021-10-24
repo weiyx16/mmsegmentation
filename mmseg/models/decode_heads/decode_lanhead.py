@@ -357,7 +357,7 @@ class LanDecodeHead(BaseModule, metaclass=ABCMeta):
         feat = self.visual_proj(feat)
         ## inference class weight:
         if self.is_test:
-            if self.class_head_weight_gathered_prompt is not None:
+            if hasattr(self, 'class_head_weight_gathered_prompt'):
                 class_head_weight_gathered = self.class_head_weight_gathered_prompt
             else:
                 print(" Inference Ensembled Feature with language head. ")
