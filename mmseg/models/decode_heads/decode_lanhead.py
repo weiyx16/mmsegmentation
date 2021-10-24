@@ -191,6 +191,7 @@ class LanDecodeHead(BaseModule, metaclass=ABCMeta):
         global_rank = int(dist.get_rank())
         total_gpu = int(dist.get_world_size())
         per_gpu_len = len(self.classnames) // total_gpu + 1
+        self.full_classnames = self.classnames
         self.classnames = self.classnames[global_rank * per_gpu_len : min((global_rank+1) * per_gpu_len, len(self.classnames))]
 
         if dropout_ratio > 0:
@@ -321,6 +322,7 @@ class LanDecodeHead(BaseModule, metaclass=ABCMeta):
         Returns:
             dict[str, Tensor]: a dictionary of loss components
         """
+        self.is_test = False
         seg_logits = self.forward(inputs)
         losses = self.losses(seg_logits, gt_semantic_seg)
         return losses
@@ -340,6 +342,7 @@ class LanDecodeHead(BaseModule, metaclass=ABCMeta):
         Returns:
             Tensor: Output segmentation map.
         """
+        self.is_test = True
         return self.forward(inputs)
 
     def cls_seg(self, feat):
@@ -353,16 +356,39 @@ class LanDecodeHead(BaseModule, metaclass=ABCMeta):
         # N * pixels * channel
         feat = self.visual_proj(feat)
         ## inference class weight:
-        sentence = []
-        for sent in self.classnames:
-            prompt = random.choice(self.templates)
-            sentence.append(prompt.format(sent))
-        prompted_imagenet_classhead_input = self.tokenizer(sentence, padding=True, truncation=True, max_length=16, return_tensors='pt')
-        prompted_imagenet_classhead_input = {k:v.to(feat.device, non_blocking=True) for k, v in prompted_imagenet_classhead_input.items()}
-        # with torch.no_grad():
-        class_head_weight = self.language_model(prompted_imagenet_classhead_input)
-        # class_head_weight_gathered = SyncFunction.apply(class_head_weight) 
-        class_head_weight_gathered = varsize_dist_collect(class_head_weight)
+        if self.is_test:
+            if self.class_head_weight_gathered_prompt is not None:
+                class_head_weight_gathered = self.class_head_weight_gathered_prompt
+            else:
+                print(" Inference Ensembled Feature with language head. ")
+                zeroshot_weights = []
+                for idx, classname in enumerate(self.full_classnames):
+                    texts = []
+                    for template in self.templates:
+                        _texts = template.format(classname)
+                        texts.append(_texts)
+                    prompted_imagenet_classhead_input = self.tokenizer(texts, padding=True, truncation=True, max_length=16, return_tensors='pt')
+                    prompted_imagenet_classhead_input = {k:v.to(feat.device, non_blocking=True) for k, v in prompted_imagenet_classhead_input.items()}
+                    with torch.no_grad():
+                        class_head_weight = self.language_model(prompted_imagenet_classhead_input)
+                        class_head_weight /= class_head_weight.norm(dim=-1, keepdim=True)
+                        class_embedding = class_head_weight.mean(dim=0)
+                        class_embedding /= class_embedding.norm()
+                    zeroshot_weights.append(class_embedding)
+                zeroshot_weights = torch.stack(zeroshot_weights, dim=1).to(feat.device).t()
+                self.class_head_weight_gathered_prompt = zeroshot_weights
+                class_head_weight_gathered = self.class_head_weight_gathered_prompt
+        else:
+            sentence = []
+            for sent in self.classnames:
+                prompt = random.choice(self.templates)
+                sentence.append(prompt.format(sent))
+            prompted_imagenet_classhead_input = self.tokenizer(sentence, padding=True, truncation=True, max_length=16, return_tensors='pt')
+            prompted_imagenet_classhead_input = {k:v.to(feat.device, non_blocking=True) for k, v in prompted_imagenet_classhead_input.items()}
+            # with torch.no_grad():
+            class_head_weight = self.language_model(prompted_imagenet_classhead_input)
+            # class_head_weight_gathered = SyncFunction.apply(class_head_weight) 
+            class_head_weight_gathered = varsize_dist_collect(class_head_weight)
         
         logit_scale = torch.clamp(self.logit_scale, max=torch.log(torch.tensor(1. / 0.01))).exp()
         feat, class_head_weight_gathered, = \
