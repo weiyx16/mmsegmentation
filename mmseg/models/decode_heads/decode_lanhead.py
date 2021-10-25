@@ -161,6 +161,7 @@ class LanDecodeHead(BaseModule, metaclass=ABCMeta):
                  ignore_index=255,
                  sampler=None,
                  align_corners=False,
+                 fix_lanhead=False,
                  init_cfg=dict(
                      type='Normal', std=0.01, override=dict(name='conv_seg'))):
         super(LanDecodeHead, self).__init__(init_cfg)
@@ -181,7 +182,12 @@ class LanDecodeHead(BaseModule, metaclass=ABCMeta):
             self.sampler = None
 
         # self.conv_seg = nn.Conv2d(channels, num_classes, kernel_size=1)
+        self.fix_lanhead = fix_lanhead
         self.language_model = LModel()
+        if self.fix_lanhead:
+            self.language_model.eval()
+            for params in self.language_model.parameters():
+                params.requires_grad = False
         self.visual_proj = nn.Linear(channels, 256, bias=False) if channels != 256 else nn.Identity()
         self.logit_scale = nn.Parameter(torch.log(torch.tensor(1. / 0.05)), requires_grad=False)
         self.tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
@@ -423,8 +429,11 @@ class LanDecodeHead(BaseModule, metaclass=ABCMeta):
                 sentence.append(prompt.format(sent).lower())
             prompted_imagenet_classhead_input = self.tokenizer(sentence, padding=True, truncation=True, max_length=16, return_tensors='pt')
             prompted_imagenet_classhead_input = {k:v.to(feat.device, non_blocking=True) for k, v in prompted_imagenet_classhead_input.items()}
-            # with torch.no_grad():
-            class_head_weight = self.language_model(prompted_imagenet_classhead_input)
+            if self.fix_lanhead:
+                with torch.no_grad():
+                    class_head_weight = self.language_model(prompted_imagenet_classhead_input)
+            else:
+                class_head_weight = self.language_model(prompted_imagenet_classhead_input)
             # class_head_weight_gathered = SyncFunction.apply(class_head_weight) 
             class_head_weight_gathered = varsize_dist_collect(class_head_weight)
         
